@@ -62,8 +62,14 @@ final class MenuBarController {
         }
 
         if windows.isEmpty {
-            let empty = NSMenuItem(title: "No accessible windows found", action: nil, keyEquivalent: "")
-            empty.isEnabled = false
+            let msg: String
+            if !WindowManager.isAccessibilityGranted() {
+                msg = "⚠️ Accessibility permission required — grant in System Settings"
+            } else {
+                msg = "No accessible windows found"
+            }
+            let empty = NSMenuItem(title: msg, action: #selector(openAccessibilitySettings), keyEquivalent: "")
+            empty.target = self
             picker.addItem(empty)
         } else {
             for (index, info) in windows.enumerated() {
@@ -93,6 +99,11 @@ final class MenuBarController {
         store.remove(slot: sender.tag)
         pendingSlot = nil
         buildMenu()
+    }
+
+    @objc private func openAccessibilitySettings() {
+        let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!
+        NSWorkspace.shared.open(url)
     }
 
     @objc private func quitApp() {

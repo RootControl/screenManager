@@ -3,8 +3,12 @@ import ApplicationServices
 
 final class WindowManager {
     static func isAccessibilityGranted() -> Bool {
+        AXIsProcessTrusted()
+    }
+
+    static func promptForAccessibility() {
         let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true]
-        return AXIsProcessTrustedWithOptions(options as CFDictionary)
+        AXIsProcessTrustedWithOptions(options as CFDictionary)
     }
 
     func enumerateWindows() -> [WindowInfo] {

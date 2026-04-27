@@ -7,7 +7,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var menuBarController: MenuBarController?
 
     @MainActor func applicationDidFinishLaunching(_ notification: Notification) {
-        _ = WindowManager.isAccessibilityGranted()
+        WindowManager.promptForAccessibility()
 
         hotkeyManager.onHotkeyPressed = { [weak self] slot in
             guard let self,
