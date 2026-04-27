@@ -21,8 +21,9 @@ final class BindingStore {
         let binding = SlotBinding(
             slot: slot,
             bundleID: info.bundleID,
-            windowTitlePattern: info.windowTitle,
-            appName: info.appName
+            windowIndex: info.windowIndex,
+            appName: info.appName,
+            windowTitle: info.windowTitle
         )
         if let idx = bindings.firstIndex(where: { $0.slot == slot }) {
             bindings[idx] = binding

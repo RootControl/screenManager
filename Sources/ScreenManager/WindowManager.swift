@@ -23,16 +23,17 @@ final class WindowManager {
             let err = AXUIElementCopyAttributeValue(axApp, kAXWindowsAttribute as CFString, &windowsRef)
             guard err == .success, let windows = windowsRef as? [AXUIElement] else { continue }
 
-            for window in windows {
+            for (idx, window) in windows.enumerated() {
                 var titleRef: CFTypeRef?
                 AXUIElementCopyAttributeValue(window, kAXTitleAttribute as CFString, &titleRef)
-                guard let title = titleRef as? String, !title.isEmpty else { continue }
+                let title = (titleRef as? String) ?? "(untitled)"
 
                 results.append(WindowInfo(
                     pid: app.processIdentifier,
                     bundleID: bundleID,
                     appName: appName,
                     windowTitle: title,
+                    windowIndex: idx,
                     axElement: window
                 ))
             }
@@ -50,24 +51,15 @@ final class WindowManager {
             let axApp = AXUIElementCreateApplication(app.processIdentifier)
             var windowsRef: CFTypeRef?
             guard AXUIElementCopyAttributeValue(axApp, kAXWindowsAttribute as CFString, &windowsRef) == .success,
-                  let windows = windowsRef as? [AXUIElement]
+                  let windows = windowsRef as? [AXUIElement],
+                  binding.windowIndex < windows.count
             else { continue }
 
-            for window in windows {
-                var titleRef: CFTypeRef?
-                AXUIElementCopyAttributeValue(window, kAXTitleAttribute as CFString, &titleRef)
-                guard let title = titleRef as? String,
-                      title.hasPrefix(binding.windowTitlePattern)
-                else { continue }
-
-                // Un-minimize if needed
-                AXUIElementSetAttributeValue(window, kAXMinimizedAttribute as CFString, false as CFBoolean)
-                // Bring window to front within its app
-                AXUIElementPerformAction(window, kAXRaiseAction as CFString)
-                // Bring the app's process to the foreground
-                app.activate(options: [])
-                return
-            }
+            let window = windows[binding.windowIndex]
+            AXUIElementSetAttributeValue(window, kAXMinimizedAttribute as CFString, false as CFBoolean)
+            AXUIElementPerformAction(window, kAXRaiseAction as CFString)
+            app.activate(options: [])
+            return
         }
     }
 }
