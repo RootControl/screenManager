@@ -103,11 +103,17 @@ final class WindowManager {
             .appendingPathComponent("Library/Application Support/Code/User/globalStorage/state.vscdb")
             .path
 
-        // Extract the project name: "folderName — Visual Studio Code" → "folderName"
-        let projectName = windowTitle
-            .components(separatedBy: " — ")
-            .first
-            .map { $0.trimmingCharacters(in: .whitespaces) } ?? ""
+        // Window title format: "tab — folder — Visual Studio Code" or "folder — Visual Studio Code"
+        // The folder name is always the last segment before "Visual Studio Code".
+        let parts = windowTitle.components(separatedBy: " — ")
+        let projectName: String
+        if parts.count >= 2 {
+            // Drop the trailing "Visual Studio Code" suffix if present, take what's left as the folder
+            let trimmed = parts.last == "Visual Studio Code" ? parts.dropLast() : ArraySlice(parts)
+            projectName = trimmed.last.map { $0.trimmingCharacters(in: .whitespaces) } ?? ""
+        } else {
+            projectName = windowTitle.trimmingCharacters(in: .whitespaces)
+        }
 
         guard !projectName.isEmpty else { return nil }
 
