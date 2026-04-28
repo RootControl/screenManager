@@ -17,13 +17,14 @@ final class BindingStore {
         bindings.first { $0.slot == slot }
     }
 
-    func update(slot: Int, with info: WindowInfo) {
+    func update(slot: Int, with info: WindowInfo, windowManager: WindowManager) {
         let binding = SlotBinding(
             slot: slot,
             bundleID: info.bundleID,
             windowIndex: info.windowIndex,
             appName: info.appName,
-            windowTitle: info.windowTitle
+            windowTitle: info.windowTitle,
+            reopenURL: windowManager.reopenURL(for: info)
         )
         if let idx = bindings.firstIndex(where: { $0.slot == slot }) {
             bindings[idx] = binding

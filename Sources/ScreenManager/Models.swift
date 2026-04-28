@@ -16,6 +16,7 @@ struct SlotBinding: Codable, Equatable {
     var windowIndex: Int  // position in the app's AX window list at bind time
     var appName: String
     var windowTitle: String  // display only, not used for matching
+    var reopenURL: String?   // URL to reopen the window if the app/window is gone
 
     var displayLabel: String {
         "\(appName) — \(windowTitle)"

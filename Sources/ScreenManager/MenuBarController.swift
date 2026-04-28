@@ -90,7 +90,7 @@ final class MenuBarController {
         guard let slot = pendingSlot,
               let info = sender.representedObject as? WindowInfo
         else { return }
-        store.update(slot: slot, with: info)
+        store.update(slot: slot, with: info, windowManager: windowManager)
         pendingSlot = nil
         buildMenu()
     }
