@@ -55,9 +55,14 @@ final class WindowManager {
 
         if raiseWindow(in: matchingApps, matching: binding) { return }
 
-        // Window not found — reopen via stored URL
-        if let urlString = binding.reopenURL, let url = URL(string: urlString) {
-            NSWorkspace.shared.open(url)
+        // Window not found — reopen the project
+        if let urlString = binding.reopenURL,
+           let url = URL(string: urlString),
+           url.scheme == "vscode" {
+            // Use `code --new-window` so VS Code always opens a new window
+            // rather than reusing the currently focused one.
+            let path = url.path // vscode://file/Users/dev/... → /Users/dev/...
+            runCommandDetached("/opt/homebrew/bin/code", args: ["--new-window", path])
             return
         }
 
@@ -171,5 +176,14 @@ final class WindowManager {
         try? process.run()
         process.waitUntilExit()
         return String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+    }
+
+    private func runCommandDetached(_ path: String, args: [String]) {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: path)
+        process.arguments = args
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        try? process.run()
     }
 }
