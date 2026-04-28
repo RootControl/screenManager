@@ -53,37 +53,56 @@ final class WindowManager {
             $0.bundleIdentifier == binding.bundleID
         }
 
-        // Try to raise the exact window by index
-        for app in matchingApps {
-            let axApp = AXUIElementCreateApplication(app.processIdentifier)
-            var windowsRef: CFTypeRef?
-            guard AXUIElementCopyAttributeValue(axApp, kAXWindowsAttribute as CFString, &windowsRef) == .success,
-                  let windows = windowsRef as? [AXUIElement],
-                  binding.windowIndex < windows.count
-            else { continue }
+        if raiseWindow(in: matchingApps, matching: binding) { return }
 
-            let window = windows[binding.windowIndex]
-            AXUIElementSetAttributeValue(window, kAXMinimizedAttribute as CFString, false as CFBoolean)
-            AXUIElementPerformAction(window, kAXRaiseAction as CFString)
-            app.activate(options: [])
-            return
-        }
-
-        // Window not found — try reopening via stored URL
+        // Window not found — reopen via stored URL
         if let urlString = binding.reopenURL, let url = URL(string: urlString) {
             NSWorkspace.shared.open(url)
             return
         }
 
-        // Fallback: activate the app if running, otherwise launch it
+        // Fallback: activate the app if running, otherwise cold-launch it
         if let app = matchingApps.first {
             app.activate(options: [])
         } else if let appURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: binding.bundleID) {
-            NSWorkspace.shared.openApplication(
-                at: appURL,
-                configuration: NSWorkspace.OpenConfiguration()
-            )
+            NSWorkspace.shared.openApplication(at: appURL, configuration: NSWorkspace.OpenConfiguration())
         }
+    }
+
+    /// Finds and raises the window described by `binding`. Returns true if a window was raised.
+    private func raiseWindow(in apps: [NSRunningApplication], matching binding: SlotBinding) -> Bool {
+        let folderName = vscodeProjectName(from: binding.windowTitle)
+
+        for app in apps {
+            let axApp = AXUIElementCreateApplication(app.processIdentifier)
+            var windowsRef: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(axApp, kAXWindowsAttribute as CFString, &windowsRef) == .success,
+                  let windows = windowsRef as? [AXUIElement]
+            else { continue }
+
+            // For apps where each window has a meaningful title (e.g. VS Code),
+            // match by title rather than index — index shifts as windows open/close.
+            let target: AXUIElement?
+            if let folder = folderName {
+                target = windows.first { axTitle($0).map { vscodeProjectName(from: $0) == folder } ?? false }
+                    ?? (binding.windowIndex < windows.count ? windows[binding.windowIndex] : nil)
+            } else {
+                target = binding.windowIndex < windows.count ? windows[binding.windowIndex] : windows.first
+            }
+
+            guard let window = target else { continue }
+            AXUIElementSetAttributeValue(window, kAXMinimizedAttribute as CFString, false as CFBoolean)
+            AXUIElementPerformAction(window, kAXRaiseAction as CFString)
+            app.activate(options: [])
+            return true
+        }
+        return false
+    }
+
+    private func axTitle(_ element: AXUIElement) -> String? {
+        var ref: CFTypeRef?
+        AXUIElementCopyAttributeValue(element, kAXTitleAttribute as CFString, &ref)
+        return ref as? String
     }
 
     // MARK: - Reopen URL resolution
@@ -96,6 +115,16 @@ final class WindowManager {
         return vscodeReopenURL(windowTitle: info.windowTitle)
     }
 
+    /// Extracts the VS Code project folder name from a window title.
+    /// Title format: "tab — folder — Visual Studio Code" → "folder"
+    private func vscodeProjectName(from windowTitle: String) -> String? {
+        let parts = windowTitle.components(separatedBy: " — ")
+        guard parts.count >= 2 else { return nil }
+        let trimmed = parts.last == "Visual Studio Code" ? parts.dropLast() : ArraySlice(parts)
+        let name = trimmed.last.map { $0.trimmingCharacters(in: .whitespaces) } ?? ""
+        return name.isEmpty ? nil : name
+    }
+
     private func vscodeReopenURL(windowTitle: String) -> String? {
         // VS Code stores recently opened folders in its globalStorage SQLite DB.
         // Match the folder name from the window title against those entries.
@@ -103,19 +132,7 @@ final class WindowManager {
             .appendingPathComponent("Library/Application Support/Code/User/globalStorage/state.vscdb")
             .path
 
-        // Window title format: "tab — folder — Visual Studio Code" or "folder — Visual Studio Code"
-        // The folder name is always the last segment before "Visual Studio Code".
-        let parts = windowTitle.components(separatedBy: " — ")
-        let projectName: String
-        if parts.count >= 2 {
-            // Drop the trailing "Visual Studio Code" suffix if present, take what's left as the folder
-            let trimmed = parts.last == "Visual Studio Code" ? parts.dropLast() : ArraySlice(parts)
-            projectName = trimmed.last.map { $0.trimmingCharacters(in: .whitespaces) } ?? ""
-        } else {
-            projectName = windowTitle.trimmingCharacters(in: .whitespaces)
-        }
-
-        guard !projectName.isEmpty else { return nil }
+        guard let projectName = vscodeProjectName(from: windowTitle) else { return nil }
 
         // Query the SQLite DB for recently opened folder URIs
         let json = runCommand("/usr/bin/sqlite3", args: [
