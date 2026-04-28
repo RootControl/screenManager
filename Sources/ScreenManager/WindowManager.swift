@@ -89,43 +89,49 @@ final class WindowManager {
     // MARK: - Reopen URL resolution
 
     /// Returns a URL string that can reopen the window associated with the given process and window title.
-    /// For VS Code, resolves the workspace folder via lsof and returns a `vscode://file/...` URL.
+    /// For VS Code, resolves the workspace folder from VS Code's SQLite history and returns a `vscode://file/...` URL.
     /// For other apps, returns nil (launch-by-bundle-ID fallback is used instead).
     func reopenURL(for info: WindowInfo) -> String? {
         guard info.bundleID == "com.microsoft.VSCode" else { return nil }
-        return vscodeReopenURL(pid: info.pid, windowTitle: info.windowTitle)
+        return vscodeReopenURL(windowTitle: info.windowTitle)
     }
 
-    private func vscodeReopenURL(pid: pid_t, windowTitle: String) -> String? {
-        // Ask lsof for all directories this VS Code process has open, then pick
-        // the deepest one that looks like a workspace root (contains .git or is
-        // the longest non-library path that matches the window title prefix).
-        let lsofOutput = runCommand("/usr/sbin/lsof", args: ["-p", "\(pid)", "-Fn", "-a", "-d", "cwd"])
-        let cwd = lsofOutput
-            .components(separatedBy: "\n")
-            .first { $0.hasPrefix("n") && !$0.contains("/Library") }
-            .map { String($0.dropFirst()) } // drop leading 'n'
+    private func vscodeReopenURL(windowTitle: String) -> String? {
+        // VS Code stores recently opened folders in its globalStorage SQLite DB.
+        // Match the folder name from the window title against those entries.
+        let dbPath = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support/Code/User/globalStorage/state.vscdb")
+            .path
 
-        if let path = cwd, !path.isEmpty {
-            let encoded = path.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? path
-            return "vscode://file/\(encoded)"
-        }
+        // Extract the project name: "folderName — Visual Studio Code" → "folderName"
+        let projectName = windowTitle
+            .components(separatedBy: " — ")
+            .first
+            .map { $0.trimmingCharacters(in: .whitespaces) } ?? ""
 
-        // Fallback: parse folder name from window title ("folderName — Visual Studio Code")
-        if let folderName = windowTitle.components(separatedBy: " — ").first,
-           !folderName.isEmpty {
-            let home = FileManager.default.homeDirectoryForCurrentUser.path
-            let candidates = [
-                "\(home)/\(folderName)",
-                "\(home)/Projects/\(folderName)",
-                "\(home)/Developer/\(folderName)",
-                "\(home)/Documents/\(folderName)",
-            ]
-            for path in candidates {
-                if FileManager.default.fileExists(atPath: path) {
-                    let encoded = path.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? path
-                    return "vscode://file/\(encoded)"
-                }
+        guard !projectName.isEmpty else { return nil }
+
+        // Query the SQLite DB for recently opened folder URIs
+        let json = runCommand("/usr/bin/sqlite3", args: [
+            dbPath,
+            "SELECT value FROM ItemTable WHERE key = 'history.recentlyOpenedPathsList';"
+        ])
+
+        if let data = json.data(using: .utf8),
+           let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let entries = root["entries"] as? [[String: Any]] {
+
+            // Find the entry whose last path component matches the project name
+            for entry in entries {
+                guard let folderURI = entry["folderUri"] as? String,
+                      let url = URL(string: folderURI),
+                      url.lastPathComponent == projectName
+                else { continue }
+
+                // Convert file:///path to vscode://file/path
+                let path = url.path
+                let encoded = path.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? path
+                return "vscode://file\(encoded)"
             }
         }
 
