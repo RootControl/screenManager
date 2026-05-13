@@ -51,10 +51,9 @@ final class HotkeyManager {
                 id: UInt32(entry.slot)
             )
             var ref: EventHotKeyRef?
-            // Ctrl+Option+N — avoids conflicts with VS Code / browser Ctrl+N shortcuts
             RegisterEventHotKey(
                 entry.code,
-                UInt32(controlKey | optionKey),
+                UInt32(optionKey),
                 hkID,
                 GetApplicationEventTarget(),
                 0,
