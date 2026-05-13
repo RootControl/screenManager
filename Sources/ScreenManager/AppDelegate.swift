@@ -15,6 +15,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             else { return }
             self.windowManager.focus(binding: binding)
         }
+
+        hotkeyManager.onBindPressed = { [weak self] slot in
+            guard let self,
+                  let info = self.windowManager.frontmostWindowInfo()
+            else { return }
+            self.bindingStore.update(slot: slot, with: info, windowManager: self.windowManager)
+            self.menuBarController?.refresh()
+        }
+
         hotkeyManager.registerAll()
 
         menuBarController = MenuBarController(store: bindingStore, windowManager: windowManager)

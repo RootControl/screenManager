@@ -46,6 +46,27 @@ final class WindowManager {
         return results
     }
 
+    func frontmostWindowInfo() -> WindowInfo? {
+        guard let app = NSWorkspace.shared.frontmostApplication,
+              let bundleID = app.bundleIdentifier,
+              let appName = app.localizedName
+        else { return nil }
+
+        let axApp = AXUIElementCreateApplication(app.processIdentifier)
+        var windowsRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(axApp, kAXWindowsAttribute as CFString, &windowsRef) == .success,
+              let windows = windowsRef as? [AXUIElement],
+              let window = windows.first
+        else { return nil }
+
+        var titleRef: CFTypeRef?
+        AXUIElementCopyAttributeValue(window, kAXTitleAttribute as CFString, &titleRef)
+        let title = (titleRef as? String) ?? "(untitled)"
+
+        return WindowInfo(pid: app.processIdentifier, bundleID: bundleID, appName: appName,
+                          windowTitle: title, windowIndex: 0, axElement: window)
+    }
+
     // MARK: - Focus
 
     func focus(binding: SlotBinding) {
