@@ -4,6 +4,7 @@ typealias HotkeyCallback = (Int) -> Void
 
 final class HotkeyManager {
     var onHotkeyPressed: HotkeyCallback?
+    var onBindPressed: HotkeyCallback?
     private var hotKeyRefs: [EventHotKeyRef] = []
     private var eventHandlerRef: EventHandlerRef?
 
@@ -36,9 +37,13 @@ final class HotkeyManager {
                     &hkID
                 )
                 let manager = Unmanaged<HotkeyManager>.fromOpaque(userData).takeUnretainedValue()
-                let slot = Int(hkID.id)
+                let id = Int(hkID.id)
                 DispatchQueue.main.async {
-                    manager.onHotkeyPressed?(slot)
+                    if id > 10 {
+                        manager.onBindPressed?(id - 10)
+                    } else {
+                        manager.onHotkeyPressed?(id)
+                    }
                 }
                 return noErr
             },
@@ -54,6 +59,24 @@ final class HotkeyManager {
             RegisterEventHotKey(
                 entry.code,
                 UInt32(optionKey),
+                hkID,
+                GetApplicationEventTarget(),
+                0,
+                &ref
+            )
+            if let ref { hotKeyRefs.append(ref) }
+        }
+
+        // ⌥⇧1–9: bind the frontmost window to a slot (IDs 11–19)
+        for entry in Self.keyCodes {
+            let hkID = EventHotKeyID(
+                signature: OSType(0x534D6770),
+                id: UInt32(entry.slot + 10)
+            )
+            var ref: EventHotKeyRef?
+            RegisterEventHotKey(
+                entry.code,
+                UInt32(optionKey | shiftKey),
                 hkID,
                 GetApplicationEventTarget(),
                 0,

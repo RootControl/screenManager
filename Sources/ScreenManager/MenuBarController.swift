@@ -18,6 +18,8 @@ final class MenuBarController {
         buildMenu()
     }
 
+    func refresh() { buildMenu() }
+
     private func buildMenu() {
         let menu = NSMenu()
 
