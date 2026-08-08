@@ -1,10 +1,8 @@
 # ScreenManager
 
-A lightweight macOS menu bar app that lets you bind any open window to a hotkey slot and jump to it instantly.
-
-## How it works
-
-Assign up to 9 windows to slots 1–9 via the menu bar. Press **Ctrl+Option+N** to instantly raise and focus the window bound to slot N, from anywhere.
+A lightweight macOS menu bar app for keyboard-driven window management: bind any
+window to a numbered slot and jump straight to it, snap windows around the
+screen, and move them between displays — all without touching the mouse.
 
 ## Requirements
 
@@ -18,47 +16,143 @@ Assign up to 9 windows to slots 1–9 via the menu bar. Press **Ctrl+Option+N** 
 make run
 ```
 
-This compiles a release build, assembles `ScreenManager.app`, code-signs it, and opens it.
+This compiles a release build, assembles `ScreenManager.app`, code-signs it, and
+opens it.
 
 | Command | Description |
 |---------|-------------|
 | `make build` | Build and assemble the `.app` bundle |
 | `make run` | Build and launch the app |
+| `make test` | Run the unit tests |
 | `make clean` | Remove `.build/` and `ScreenManager.app` |
+
+`make build` prefers SwiftPM and falls back to invoking `swiftc` directly if
+`swift build` is unavailable.
+
+The tests use [swift-testing](https://github.com/swiftlang/swift-testing), which
+ships with Xcode rather than with the Command Line Tools — `make test` needs a
+full Xcode install. Building and running the app needs only the Command Line
+Tools.
+
+## Hotkeys
+
+All modifiers are configurable under **Settings** in the menu bar; the defaults
+are listed here.
+
+### Slots
+
+| Shortcut | Action |
+|----------|--------|
+| ⌥1 – ⌥9 | Focus the window bound to that slot |
+| ⌥1 again | Return to the window you came from |
+| ⌥⇧1 – ⌥⇧9 | Bind the current window to that slot |
+
+Binding is confirmed by the slot number flashing in the menu bar. The bind
+shortcut always tracks the focus shortcut plus Shift, so the two can never
+collide.
+
+### Layout
+
+| Shortcut | Action |
+|----------|--------|
+| ⌃⌥← / → | Left / right half |
+| ⌃⌥↑ / ↓ | Top / bottom half |
+| ⌃⌥U / I / J / K | Top-left / top-right / bottom-left / bottom-right quarter |
+| ⌃⌥↩ | Maximize |
+| ⌃⌥C | Center without resizing |
+
+Thirds and two-thirds layouts are available from **Window Layout** in the menu.
+
+### Displays
+
+| Shortcut | Action |
+|----------|--------|
+| ⌃⌥⌘← / → | Move the window to the previous / next display |
+| ⌃⌥⌘1 – ⌃⌥⌘9 | Move the window to display 1–9 |
+
+Windows keep their relative position and proportional size when they move
+between displays, and are clamped to fit if the target is smaller.
 
 ## Usage
 
-1. Click the keyboard icon in the menu bar.
-2. Click a slot (e.g. `[1] (empty)`) to open the window picker.
-3. Select any open window to bind it to that slot.
-4. Press **Ctrl+Option+1–9** to jump to the bound window.
+Click the keyboard icon in the menu bar. Each slot has a submenu:
 
-To clear a slot, click it in the menu bar and choose **Clear slot N**.
+- **Pick Window…** — a searchable list of every open window. Type to filter,
+  arrow keys to move, Return to bind, Escape to cancel.
+- **Bind Frontmost Window** — same as ⌥⇧N.
+- **Save Current Position** — remembers where the window sits, and puts it back
+  there every time you focus the slot.
+- **Clear Slot** — unbinds.
+
+Slot labels track the window's current title, so a VS Code slot follows the tab
+you have open. A slot whose window has closed is greyed out and marked
+`(closed)`; focusing it reopens the window instead.
+
+### Profiles
+
+**Profiles** keeps independent sets of bindings — one for the desk with two
+displays, another for the laptop alone — and switches between them in one click.
+Duplicating a profile copies the current bindings into it.
+
+### Settings
+
+- Modifiers for the focus, layout, and display shortcuts
+- How many slots to expose (1–9)
+- Whether pressing a slot again returns you to the previous window
+- Whether focusing a slot also restores its saved position
+- Launch at login
+
+If macOS refuses a hotkey because another app already owns it, the menu bar
+shows a warning listing exactly which combinations failed.
+
+## Reopening closed windows
+
+Focusing a slot whose window is gone brings it back:
+
+1. If the window had a document, it reopens that file in the same app.
+2. VS Code project windows reopen via `code --new-window`, with the folder path
+   resolved from VS Code's own history database. The `code` CLI is located
+   automatically across Homebrew, `/usr/local`, and the app bundle.
+3. Otherwise the app itself is launched or activated.
 
 ## Permissions
 
-ScreenManager uses the macOS Accessibility API to enumerate and raise windows. Grant access in **System Settings → Privacy & Security → Accessibility**. If permission is missing, the picker will show a warning with a link to open the settings pane directly.
+ScreenManager uses the macOS Accessibility API to enumerate, move, and raise
+windows. Grant access in **System Settings → Privacy & Security →
+Accessibility**. Without it, the menu shows a warning that links straight to the
+settings pane.
+
+Launch at login requires the app to be running from `ScreenManager.app` rather
+than directly out of `.build/`.
 
 ## Project Structure
 
 ```
-Sources/ScreenManager/
-├── main.swift            # Entry point
-├── AppDelegate.swift     # App lifecycle, wires components together
-├── HotkeyManager.swift   # Registers Ctrl+Option+1–9 via Carbon event API
-├── WindowManager.swift   # AX API: enumerate windows, focus a binding
-├── MenuBarController.swift # Status item, slot menu, window picker
-├── BindingStore.swift    # Persists slot → window bindings
-└── Models.swift          # WindowInfo and SlotBinding types
+Sources/ScreenManagerCore/     # All logic — imported by the executable and the tests
+├── AppDelegate.swift          # Lifecycle, hotkey dispatch, toggle-back state
+├── BindingStore.swift         # Slot → window bindings, profiles, migration
+├── HotkeyManager.swift        # Carbon hotkey registration, IDs, and the hotkey plan
+├── LayoutCalculator.swift     # Pure frame arithmetic (halves, thirds, display moves)
+├── LoginItem.swift            # SMAppService registration
+├── MenuBarController.swift    # Status item and menus
+├── Models.swift               # WindowInfo, SlotBinding, CodableRect
+├── Preferences.swift          # Modifier combos and persisted settings
+├── WindowManager.swift        # AX API: enumerate, resolve, focus, move, reopen
+└── WindowPicker.swift         # Searchable window picker panel
+Sources/ScreenManager/main.swift   # Entry point shim
+Tests/ScreenManagerTests/          # Unit tests for the pure logic
 ```
 
-## Hotkeys
+Windows are matched by `CGWindowID` first, then by document path, then by title,
+and only finally by list position — so a binding survives other windows opening,
+closing, and being renamed.
 
-| Shortcut | Action |
-|----------|--------|
-| Ctrl+Option+1 | Focus window bound to slot 1 |
-| Ctrl+Option+2 | Focus window bound to slot 2 |
-| … | … |
-| Ctrl+Option+9 | Focus window bound to slot 9 |
+## Storage
 
-Ctrl+Option was chosen to avoid conflicts with common shortcuts in browsers and editors.
+`~/Library/Application Support/ScreenManager/`
+
+- `bindings.json` — profiles and their slot bindings
+- `preferences.json` — modifiers and settings
+
+Older single-profile `bindings.json` files are migrated automatically into a
+profile named `Default`.
