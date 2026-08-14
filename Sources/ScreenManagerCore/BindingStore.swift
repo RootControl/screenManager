@@ -86,6 +86,14 @@ final class BindingStore {
         ))
     }
 
+    /// Replaces a stale window ID after the window had to be found by document,
+    /// title, or position, so the next lookup matches on identity again.
+    func refreshWindowID(_ windowID: UInt32?, forSlot slot: Int) {
+        guard var binding = binding(forSlot: slot), binding.windowID != windowID else { return }
+        binding.windowID = windowID
+        set(binding)
+    }
+
     func saveFrame(_ frame: CodableRect?, forSlot slot: Int) {
         guard var binding = binding(forSlot: slot) else { return }
         binding.savedFrame = frame

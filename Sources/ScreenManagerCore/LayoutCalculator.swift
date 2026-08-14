@@ -29,10 +29,110 @@ enum LayoutPosition: String, Codable, CaseIterable {
     }
 }
 
+/// A spatial direction, used for focusing the neighbouring window.
+enum Direction: String, CaseIterable {
+    case left, right, up, down
+
+    var title: String {
+        switch self {
+        case .left: return "Focus Left"
+        case .right: return "Focus Right"
+        case .up: return "Focus Up"
+        case .down: return "Focus Down"
+        }
+    }
+}
+
 /// Pure frame arithmetic. Every function here works in AX coordinates —
 /// origin at the top-left of the primary display, y growing downward — so
 /// callers convert once at the boundary and never think about it again.
 enum LayoutCalculator {
+
+    /// Index of the best window to move focus to, or nil if nothing lies that
+    /// way. Windows overlapping the origin's perpendicular band are strongly
+    /// preferred, so focus travels along a row rather than diagonally.
+    static func directionalTarget(from origin: CGRect, candidates: [CGRect], direction: Direction) -> Int? {
+        var best: (index: Int, score: CGFloat)?
+
+        for (index, candidate) in candidates.enumerated() {
+            guard let score = directionalScore(from: origin, to: candidate, direction: direction) else { continue }
+            if best == nil || score < best!.score {
+                best = (index, score)
+            }
+        }
+        return best?.index
+    }
+
+    /// Lower is better; nil means the candidate is not in that direction.
+    private static func directionalScore(from origin: CGRect, to target: CGRect, direction: Direction) -> CGFloat? {
+        let dx = target.midX - origin.midX
+        let dy = target.midY - origin.midY
+
+        let primary: CGFloat
+        let perpendicular: CGFloat
+        let inBand: Bool
+
+        // y grows downward, so "up" is the negative direction.
+        switch direction {
+        case .left:
+            primary = -dx
+            perpendicular = abs(dy)
+            inBand = origin.minY < target.maxY && target.minY < origin.maxY
+        case .right:
+            primary = dx
+            perpendicular = abs(dy)
+            inBand = origin.minY < target.maxY && target.minY < origin.maxY
+        case .up:
+            primary = -dy
+            perpendicular = abs(dx)
+            inBand = origin.minX < target.maxX && target.minX < origin.maxX
+        case .down:
+            primary = dy
+            perpendicular = abs(dx)
+            inBand = origin.minX < target.maxX && target.minX < origin.maxX
+        }
+
+        guard primary > 1 else { return nil }
+        return primary + perpendicular * (inBand ? 0.25 : 3)
+    }
+
+    /// A stable identifier for the current display arrangement, used to pick a
+    /// profile automatically. Sorted so screen enumeration order cannot change
+    /// the fingerprint for an unchanged setup.
+    static func screenFingerprint(_ screens: [CGRect]) -> String {
+        screens
+            .map { "\(Int($0.width))x\(Int($0.height))@\(Int($0.minX)),\(Int($0.minY))" }
+            .sorted()
+            .joined(separator: "|")
+    }
+
+    /// The layout implied by dropping a window at `point` — screen edges give
+    /// halves, corners give quarters. Returns nil away from any edge.
+    static func edgeLayout(for point: CGPoint, in screen: CGRect, threshold: CGFloat = 12) -> LayoutPosition? {
+        guard screen.insetBy(dx: -threshold, dy: -threshold).contains(point) else { return nil }
+
+        let nearLeft = point.x <= screen.minX + threshold
+        let nearRight = point.x >= screen.maxX - threshold
+        let nearTop = point.y <= screen.minY + threshold
+        let nearBottom = point.y >= screen.maxY - threshold
+
+        // Corners take priority over edges.
+        let corner = screen.height * 0.25
+        let inTopBand = point.y <= screen.minY + corner
+        let inBottomBand = point.y >= screen.maxY - corner
+
+        switch (nearLeft, nearRight, nearTop, nearBottom) {
+        case (true, _, true, _): return .topLeft
+        case (true, _, _, true): return .bottomLeft
+        case (_, true, true, _): return .topRight
+        case (_, true, _, true): return .bottomRight
+        case (true, _, _, _): return inTopBand ? .topLeft : (inBottomBand ? .bottomLeft : .leftHalf)
+        case (_, true, _, _): return inTopBand ? .topRight : (inBottomBand ? .bottomRight : .rightHalf)
+        case (_, _, true, _): return .maximize
+        case (_, _, _, true): return .bottomHalf
+        default: return nil
+        }
+    }
 
     /// The frame `position` implies inside `area`. `current` is only consulted
     /// for `.center`, which preserves the window's existing size.

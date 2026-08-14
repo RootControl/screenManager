@@ -16,6 +16,10 @@ enum KeyCode {
     static let k: UInt32 = 0x28
     static let c: UInt32 = 0x08
     static let ret: UInt32 = 0x24
+    static let h: UInt32 = 0x04
+    static let l: UInt32 = 0x25
+    static let r: UInt32 = 0x0F
+    static let z: UInt32 = 0x06
 }
 
 struct HotkeySpec {
@@ -121,13 +125,21 @@ enum HotkeyAction: Equatable {
     case moveToDisplay(index: Int)
     case layout(LayoutPosition)
     case cycleDisplay(delta: Int)
+    case moveToSpace(index: Int)
+    case focusDirection(Direction)
+    case restoreAll
+    case undoLayout
 
     private static let focusBase: UInt32 = 1
     private static let bindBase: UInt32 = 11
     private static let displayBase: UInt32 = 21
     private static let layoutBase: UInt32 = 31
+    private static let spaceBase: UInt32 = 71
+    private static let directionBase: UInt32 = 81
     static let previousDisplayID: UInt32 = 61
     static let nextDisplayID: UInt32 = 62
+    static let restoreAllID: UInt32 = 63
+    static let undoLayoutID: UInt32 = 64
 
     var id: UInt32 {
         switch self {
@@ -138,6 +150,12 @@ enum HotkeyAction: Equatable {
             let index = LayoutPosition.allCases.firstIndex(of: position) ?? 0
             return Self.layoutBase + UInt32(index)
         case .cycleDisplay(let delta): return delta < 0 ? Self.previousDisplayID : Self.nextDisplayID
+        case .moveToSpace(let index): return Self.spaceBase + UInt32(index)
+        case .focusDirection(let direction):
+            let index = Direction.allCases.firstIndex(of: direction) ?? 0
+            return Self.directionBase + UInt32(index)
+        case .restoreAll: return Self.restoreAllID
+        case .undoLayout: return Self.undoLayoutID
         }
     }
 
@@ -155,6 +173,14 @@ enum HotkeyAction: Equatable {
             return .cycleDisplay(delta: -1)
         case nextDisplayID:
             return .cycleDisplay(delta: 1)
+        case restoreAllID:
+            return .restoreAll
+        case undoLayoutID:
+            return .undoLayout
+        case spaceBase..<(spaceBase + 9):
+            return .moveToSpace(index: Int(id - spaceBase))
+        case directionBase..<(directionBase + UInt32(Direction.allCases.count)):
+            return .focusDirection(Direction.allCases[Int(id - directionBase)])
         default:
             return nil
         }
@@ -175,6 +201,14 @@ enum HotkeyPlan {
         (.bottomRight, KeyCode.k, "K"),
         (.maximize, KeyCode.ret, "↩"),
         (.center, KeyCode.c, "C"),
+    ]
+
+    /// Directional focus, laid out like vim's HJKL.
+    static let directionKeys: [(direction: Direction, keyCode: UInt32, symbol: String)] = [
+        (.left, KeyCode.h, "H"),
+        (.down, KeyCode.j, "J"),
+        (.up, KeyCode.k, "K"),
+        (.right, KeyCode.l, "L"),
     ]
 
     static func specs(for preferences: Preferences) -> [HotkeySpec] {
@@ -223,6 +257,43 @@ enum HotkeyPlan {
             keyCode: KeyCode.rightArrow,
             modifiers: preferences.displayModifiers,
             label: "\(preferences.displayModifiers.display)→ (next display)"
+        ))
+
+        // Directional focus shares the display modifier; HJKL cannot collide
+        // with the digits or arrows already registered under it.
+        for entry in directionKeys {
+            specs.append(HotkeySpec(
+                id: HotkeyAction.focusDirection(entry.direction).id,
+                keyCode: entry.keyCode,
+                modifiers: preferences.displayModifiers,
+                label: "\(preferences.displayModifiers.display)\(entry.symbol) (\(entry.direction.title))"
+            ))
+        }
+
+        // Spaces, when the private API is available to serve them.
+        if SpacesBridge.isAvailable {
+            for slot in 1...slots {
+                guard let code = KeyCode.digits[slot] else { continue }
+                specs.append(HotkeySpec(
+                    id: HotkeyAction.moveToSpace(index: slot - 1).id,
+                    keyCode: code,
+                    modifiers: preferences.spaceModifiers,
+                    label: "\(preferences.spaceModifiers.display)\(slot) (move to Space \(slot))"
+                ))
+            }
+        }
+
+        specs.append(HotkeySpec(
+            id: HotkeyAction.restoreAll.id,
+            keyCode: KeyCode.r,
+            modifiers: preferences.layoutModifiers,
+            label: "\(preferences.layoutModifiers.display)R (restore all positions)"
+        ))
+        specs.append(HotkeySpec(
+            id: HotkeyAction.undoLayout.id,
+            keyCode: KeyCode.z,
+            modifiers: preferences.layoutModifiers,
+            label: "\(preferences.layoutModifiers.display)Z (undo layout change)"
         ))
 
         return specs

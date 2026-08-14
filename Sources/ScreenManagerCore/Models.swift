@@ -35,6 +35,44 @@ struct CodableRect: Codable, Equatable {
     }
 }
 
+/// The identity fields used to find a live window again. Both slot bindings and
+/// saved arrangements resolve through this, so the matching rules live in one
+/// place rather than being reimplemented per feature.
+struct WindowQuery {
+    var bundleID: String
+    var windowID: UInt32?
+    var documentPath: String?
+    var windowTitle: String
+    var windowIndex: Int
+}
+
+/// One window's placement inside a saved arrangement.
+struct WindowSnapshot: Codable, Equatable {
+    var bundleID: String
+    var appName: String
+    var windowTitle: String
+    var windowIndex: Int
+    var windowID: UInt32?
+    var documentPath: String?
+    var frame: CodableRect
+
+    var query: WindowQuery {
+        WindowQuery(
+            bundleID: bundleID,
+            windowID: windowID,
+            documentPath: documentPath,
+            windowTitle: windowTitle,
+            windowIndex: windowIndex
+        )
+    }
+}
+
+/// A named capture of where every window sat at one moment.
+struct Arrangement: Codable, Equatable {
+    var name: String
+    var snapshots: [WindowSnapshot]
+}
+
 struct SlotBinding: Codable, Equatable {
     var slot: Int
     var bundleID: String
@@ -84,5 +122,15 @@ struct SlotBinding: Codable, Equatable {
 
     var displayLabel: String {
         "\(appName) — \(windowTitle)"
+    }
+
+    var query: WindowQuery {
+        WindowQuery(
+            bundleID: bundleID,
+            windowID: windowID,
+            documentPath: documentPath,
+            windowTitle: windowTitle,
+            windowIndex: windowIndex
+        )
     }
 }
