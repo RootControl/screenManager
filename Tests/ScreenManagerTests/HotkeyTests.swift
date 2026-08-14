@@ -11,8 +11,10 @@ struct HotkeyActionTests {
         (1...9).map { HotkeyAction.focus(slot: $0) }
         + (1...9).map { HotkeyAction.bind(slot: $0) }
         + (0..<9).map { HotkeyAction.moveToDisplay(index: $0) }
+        + (0..<9).map { HotkeyAction.moveToSpace(index: $0) }
         + LayoutPosition.allCases.map { HotkeyAction.layout($0) }
-        + [.cycleDisplay(delta: -1), .cycleDisplay(delta: 1)]
+        + Direction.allCases.map { HotkeyAction.focusDirection($0) }
+        + [.cycleDisplay(delta: -1), .cycleDisplay(delta: 1), .restoreAll, .undoLayout]
 
     @Test func everyActionSurvivesAnIDRoundTrip() {
         for action in Self.allActions {
@@ -111,6 +113,34 @@ struct HotkeyPlanTests {
         #expect(focus?.keyCode == bind?.keyCode)
     }
 
+    @Test func directionalFocusGetsAShortcutForEveryDirection() {
+        let actions = HotkeyPlan.specs(for: Preferences()).compactMap { HotkeyAction.from(id: $0.id) }
+
+        for direction in Direction.allCases {
+            #expect(actions.contains(.focusDirection(direction)), "\(direction) has no shortcut")
+        }
+    }
+
+    @Test func restoreAndUndoAreRegistered() {
+        let actions = HotkeyPlan.specs(for: Preferences()).compactMap { HotkeyAction.from(id: $0.id) }
+
+        #expect(actions.contains(.restoreAll))
+        #expect(actions.contains(.undoLayout))
+    }
+
+    @Test func spaceShortcutsTrackTheSlotCount() {
+        // Spaces are only registered when the private API resolved, so this
+        // asserts the relationship rather than a fixed count.
+        var preferences = Preferences()
+        preferences.slotCount = 5
+        let spaceCount = HotkeyPlan.specs(for: preferences)
+            .compactMap { HotkeyAction.from(id: $0.id) }
+            .filter { if case .moveToSpace = $0 { return true } else { return false } }
+            .count
+
+        #expect(spaceCount == (SpacesBridge.isAvailable ? 5 : 0))
+    }
+
     @Test func labelsNameTheChordSoConflictsAreReadable() {
         let specs = HotkeyPlan.specs(for: Preferences())
         let focus = specs.first { HotkeyAction.from(id: $0.id) == .focus(slot: 1) }
@@ -195,9 +225,13 @@ struct PreferencesTests {
         #expect(preferences.bindModifiers.display == "⌥⇧")
         #expect(preferences.layoutModifiers == .controlOption)
         #expect(preferences.displayModifiers == .controlOptionCommand)
+        #expect(preferences.spaceModifiers == .controlOptionShift)
         #expect(preferences.slotCount == 9)
-        #expect(preferences.toggleBackEnabled)
+        #expect(preferences.repeatPress == .goBack)
         #expect(preferences.restoreFramesOnFocus)
+        #expect(preferences.autoSwitchProfiles)
+        #expect(!preferences.dragToEdgeSnapping)
+        #expect(!preferences.slotHUDEnabled)
     }
 
     @Test func persistAcrossInstances() {
@@ -209,14 +243,14 @@ struct PreferencesTests {
         first.mutate {
             $0.focusModifiers = .controlCommand
             $0.slotCount = 4
-            $0.toggleBackEnabled = false
+            $0.repeatPress = .cycleWindows
         }
 
         let second = PreferencesStore(directory: directory)
 
         #expect(second.preferences.focusModifiers == .controlCommand)
         #expect(second.preferences.slotCount == 4)
-        #expect(!second.preferences.toggleBackEnabled)
+        #expect(second.preferences.repeatPress == .cycleWindows)
     }
 
     @Test func aMissingFileYieldsDefaults() {

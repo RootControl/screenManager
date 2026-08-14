@@ -1,12 +1,29 @@
 import AppKit
 import ApplicationServices
 
+/// A window found on the system, plus how confidently it was identified.
+struct ResolvedWindow {
+    let app: NSRunningApplication
+    let element: AXUIElement
+    let windowID: CGWindowID?
+    /// False when the window had to be found by document, title, or position —
+    /// a signal that the stored window ID is stale and worth refreshing.
+    let matchedByWindowID: Bool
+}
+
 final class WindowManager {
 
     /// Opening our own menu makes ScreenManager frontmost, which would hide the
     /// window the user is actually working in. The app supplies the PID it last
     /// saw activate so menu-driven actions still target that window.
     var externalPIDProvider: (() -> pid_t?)?
+
+    /// Bundle IDs to hide from window enumeration.
+    var excludedBundleIDs: Set<String> = []
+
+    /// Frames replaced by a layout or display move, newest last.
+    private var undoStack: [(windowID: CGWindowID, frame: CGRect)] = []
+    private static let undoLimit = 25
 
     // MARK: - Permission
 
@@ -30,6 +47,7 @@ final class WindowManager {
                 app.activationPolicy != .prohibited,
                 app.processIdentifier != ownPID,
                 let bundleID = app.bundleIdentifier,
+                !excludedBundleIDs.contains(bundleID),
                 let appName = app.localizedName
             else { continue }
 
@@ -124,11 +142,11 @@ final class WindowManager {
 
     // MARK: - Resolution
 
-    /// Locates the live window a binding refers to, trying the most reliable
-    /// key first: window ID, then document, then title, then list position.
-    func resolve(binding: SlotBinding) -> (app: NSRunningApplication, window: AXUIElement)? {
-        let apps = NSWorkspace.shared.runningApplications.filter { $0.bundleIdentifier == binding.bundleID }
-        let projectName = Self.vscodeProjectName(from: binding.windowTitle)
+    /// Locates the live window a query refers to, trying the most reliable key
+    /// first: window ID, then document, then title, then list position.
+    func resolve(query: WindowQuery) -> ResolvedWindow? {
+        let apps = NSWorkspace.shared.runningApplications.filter { $0.bundleIdentifier == query.bundleID }
+        let projectName = Self.vscodeProjectName(from: query.windowTitle)
 
         for app in apps {
             let candidates = windows(ofPID: app.processIdentifier).filter {
@@ -136,28 +154,55 @@ final class WindowManager {
             }
             guard !candidates.isEmpty else { continue }
 
-            if let wid = binding.windowID,
+            if let wid = query.windowID,
                let match = candidates.first(where: { identifier(of: $0) == wid }) {
-                return (app, match)
+                return resolution(app: app, window: match, matchedByWindowID: true)
             }
-            if let path = binding.documentPath,
+            if let path = query.documentPath,
                let match = candidates.first(where: { document(of: $0) == path }) {
-                return (app, match)
+                return resolution(app: app, window: match, matchedByWindowID: false)
             }
             if let projectName,
                let match = candidates.first(where: { window in
                    guard let title = title(of: window) else { return false }
                    return Self.vscodeProjectName(from: title) == projectName
                }) {
-                return (app, match)
+                return resolution(app: app, window: match, matchedByWindowID: false)
             }
-            if let match = candidates.first(where: { title(of: $0) == binding.windowTitle }) {
-                return (app, match)
+            if let match = candidates.first(where: { title(of: $0) == query.windowTitle }) {
+                return resolution(app: app, window: match, matchedByWindowID: false)
             }
-            if binding.windowIndex < candidates.count {
-                return (app, candidates[binding.windowIndex])
+            if query.windowIndex < candidates.count {
+                return resolution(app: app, window: candidates[query.windowIndex], matchedByWindowID: false)
             }
-            return (app, candidates[0])
+            return resolution(app: app, window: candidates[0], matchedByWindowID: false)
+        }
+        return nil
+    }
+
+    func resolve(binding: SlotBinding) -> ResolvedWindow? {
+        resolve(query: binding.query)
+    }
+
+    private func resolution(app: NSRunningApplication, window: AXUIElement, matchedByWindowID: Bool) -> ResolvedWindow {
+        ResolvedWindow(
+            app: app,
+            element: window,
+            windowID: identifier(of: window),
+            matchedByWindowID: matchedByWindowID
+        )
+    }
+
+    /// Finds a window anywhere on the system by its ID. Used to undo a layout
+    /// change on a window that may no longer be frontmost.
+    func window(withID id: CGWindowID) -> ResolvedWindow? {
+        let ownPID = ProcessInfo.processInfo.processIdentifier
+
+        for app in NSWorkspace.shared.runningApplications
+        where app.activationPolicy != .prohibited && app.processIdentifier != ownPID {
+            if let match = windows(ofPID: app.processIdentifier).first(where: { identifier(of: $0) == id }) {
+                return resolution(app: app, window: match, matchedByWindowID: true)
+            }
         }
         return nil
     }
@@ -169,27 +214,81 @@ final class WindowManager {
               let resolved = resolve(binding: binding)
         else { return false }
 
-        if let frontID = front.windowID, let resolvedID = identifier(of: resolved.window) {
+        if let frontID = front.windowID, let resolvedID = resolved.windowID {
             return frontID == resolvedID
         }
-        return front.windowTitle == title(of: resolved.window)
+        return front.windowTitle == title(of: resolved.element)
     }
 
     // MARK: - Focus
 
     /// Raises the bound window, restoring its saved frame when it has one.
-    /// Returns false if nothing could be raised and a reopen was attempted.
+    /// Returns the resolution so the caller can refresh a stale window ID, or
+    /// nil when the window was gone and a reopen was attempted instead.
     @discardableResult
-    func focus(binding: SlotBinding, restoreFrame: Bool = true) -> Bool {
-        if let (app, window) = resolve(binding: binding) {
-            if restoreFrame, let saved = binding.savedFrame {
-                setFrame(saved.cgRect, for: window)
+    func focus(binding: SlotBinding, restoreFrame: Bool = true) -> ResolvedWindow? {
+        guard let resolved = resolve(binding: binding) else {
+            reopen(binding: binding)
+            return nil
+        }
+
+        if restoreFrame, let saved = binding.savedFrame {
+            setFrame(saved.cgRect, for: resolved.element)
+        }
+        raise(window: resolved.element, in: resolved.app)
+        return resolved
+    }
+
+    /// Raises the app's next window after the one that currently has focus,
+    /// wrapping around. Returns false when the app has only one window.
+    @discardableResult
+    func cycleWindows(ofBundleID bundleID: String) -> Bool {
+        let apps = NSWorkspace.shared.runningApplications.filter { $0.bundleIdentifier == bundleID }
+        let focusedID = focusedWindowInfo()?.windowID
+
+        for app in apps {
+            let candidates = windows(ofPID: app.processIdentifier).filter {
+                role(of: $0) == kAXWindowRole as String
             }
-            raise(window: window, in: app)
+            guard candidates.count > 1 else { continue }
+
+            let current = candidates.firstIndex { identifier(of: $0) == focusedID } ?? 0
+            let next = candidates[(current + 1) % candidates.count]
+            raise(window: next, in: app)
             return true
         }
-        reopen(binding: binding)
         return false
+    }
+
+    /// Moves focus to the nearest window in a direction, across every app and
+    /// display. Returns false when nothing lies that way.
+    @discardableResult
+    func focusWindow(inDirection direction: Direction) -> Bool {
+        let windows = enumerateWindows()
+        guard let currentID = focusedWindowInfo()?.windowID else { return false }
+
+        var origin: CGRect?
+        var candidates: [(info: WindowInfo, frame: CGRect)] = []
+
+        for info in windows {
+            guard let frame = frame(of: info.axElement), frame.width > 1, frame.height > 1 else { continue }
+            if info.windowID == currentID {
+                origin = frame
+            } else {
+                candidates.append((info, frame))
+            }
+        }
+
+        guard let origin,
+              let index = LayoutCalculator.directionalTarget(
+                  from: origin,
+                  candidates: candidates.map(\.frame),
+                  direction: direction
+              )
+        else { return false }
+
+        focus(info: candidates[index].info)
+        return true
     }
 
     func focus(info: WindowInfo) {
@@ -256,14 +355,98 @@ final class WindowManager {
 
     @discardableResult
     func applyLayout(_ position: LayoutPosition) -> Bool {
-        guard let (_, window) = currentWindow(),
-              let current = frame(of: window),
+        guard let (_, window) = currentWindow() else { return false }
+        return applyLayout(position, to: window)
+    }
+
+    @discardableResult
+    func applyLayout(_ position: LayoutPosition, to window: AXUIElement) -> Bool {
+        guard let current = frame(of: window),
               let index = LayoutCalculator.screenIndex(containing: current, screens: screenFrames())
         else { return false }
 
+        recordUndo(window: window, frame: current)
         let area = visibleScreenFrames()[index]
         setFrame(LayoutCalculator.frame(for: position, in: area, current: current), for: window)
         return true
+    }
+
+    // MARK: - Undo
+
+    private func recordUndo(window: AXUIElement, frame: CGRect) {
+        guard let id = identifier(of: window) else { return }
+        undoStack.append((id, frame))
+        if undoStack.count > Self.undoLimit {
+            undoStack.removeFirst(undoStack.count - Self.undoLimit)
+        }
+    }
+
+    var canUndo: Bool { !undoStack.isEmpty }
+
+    /// Puts the most recently moved window back where it was. Entries whose
+    /// window has since closed are discarded rather than skipped over.
+    @discardableResult
+    func undoLastFrameChange() -> Bool {
+        while let entry = undoStack.popLast() {
+            guard let resolved = window(withID: entry.windowID) else { continue }
+            setFrame(entry.frame, for: resolved.element)
+            raise(window: resolved.element, in: resolved.app)
+            return true
+        }
+        return false
+    }
+
+    // MARK: - Bulk placement
+
+    /// Applies every saved frame in `bindings`, without raising anything.
+    /// Returns how many windows were actually moved.
+    @discardableResult
+    func restoreFrames(for bindings: [SlotBinding]) -> Int {
+        var moved = 0
+        for binding in bindings {
+            guard let saved = binding.savedFrame,
+                  let resolved = resolve(binding: binding),
+                  let current = frame(of: resolved.element)
+            else { continue }
+
+            recordUndo(window: resolved.element, frame: current)
+            setFrame(saved.cgRect, for: resolved.element)
+            moved += 1
+        }
+        return moved
+    }
+
+    /// Captures every visible window's placement for a named arrangement.
+    func captureArrangement() -> [WindowSnapshot] {
+        enumerateWindows().compactMap { info in
+            guard let frame = frame(of: info.axElement), frame.width > 1, frame.height > 1 else { return nil }
+            return WindowSnapshot(
+                bundleID: info.bundleID,
+                appName: info.appName,
+                windowTitle: info.windowTitle,
+                windowIndex: info.windowIndex,
+                windowID: info.windowID,
+                documentPath: info.documentPath,
+                frame: CodableRect(frame)
+            )
+        }
+    }
+
+    /// Restores a captured arrangement, skipping windows that no longer exist.
+    /// Returns how many were placed.
+    @discardableResult
+    func restore(arrangement: Arrangement) -> Int {
+        var restored = 0
+        for snapshot in arrangement.snapshots {
+            guard let resolved = resolve(query: snapshot.query),
+                  let current = frame(of: resolved.element)
+            else { continue }
+
+            recordUndo(window: resolved.element, frame: current)
+            setFrame(snapshot.frame.cgRect, for: resolved.element)
+            restored += 1
+        }
+        return restored
     }
 
     /// Moves the focused window to `index`, preserving its relative placement.
@@ -277,6 +460,7 @@ final class WindowManager {
         else { return false }
 
         guard sourceIndex != index else { return true }
+        recordUndo(window: window, frame: current)
         setFrame(LayoutCalculator.translate(current, from: visible[sourceIndex], to: visible[index]), for: window)
         raise(window: window, in: app)
         return true
@@ -309,8 +493,8 @@ final class WindowManager {
     }
 
     func frame(ofBinding binding: SlotBinding) -> CGRect? {
-        guard let (_, window) = resolve(binding: binding) else { return nil }
-        return frame(of: window)
+        guard let resolved = resolve(binding: binding) else { return nil }
+        return frame(of: resolved.element)
     }
 
     /// The bound window's title as it reads right now, which drifts from the
@@ -318,8 +502,8 @@ final class WindowManager {
     /// Returns nil only when the window no longer exists, so callers can use it
     /// as the "is this slot still alive?" check.
     func liveTitle(ofBinding binding: SlotBinding) -> String? {
-        guard let (_, window) = resolve(binding: binding) else { return nil }
-        return title(of: window) ?? binding.windowTitle
+        guard let resolved = resolve(binding: binding) else { return nil }
+        return title(of: resolved.element) ?? binding.windowTitle
     }
 
     // MARK: - Reopening

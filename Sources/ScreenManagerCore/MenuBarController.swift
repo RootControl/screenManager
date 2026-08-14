@@ -10,6 +10,13 @@ struct MenuBarActions {
     var clearSlot: (Int) -> Void
     var applyLayout: (LayoutPosition) -> Void
     var moveToDisplay: (Int) -> Void
+    var moveToSpace: (Int) -> Void
+    var restoreAll: () -> Void
+    var undoLayout: () -> Void
+    var saveArrangement: (String) -> Void
+    var restoreArrangement: (String) -> Void
+    var deleteArrangement: (String) -> Void
+    var assignProfileToDisplays: () -> Void
     var preferencesChanged: () -> Void
     var quit: () -> Void
 }
@@ -18,6 +25,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     private let statusItem: NSStatusItem
     private let store: BindingStore
     private let preferencesStore: PreferencesStore
+    private let arrangementStore: ArrangementStore
     private let windowManager: WindowManager
     private let actions: MenuBarActions
     private var hotkeyConflicts: [String] = []
@@ -28,11 +36,13 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     init(
         store: BindingStore,
         preferencesStore: PreferencesStore,
+        arrangementStore: ArrangementStore,
         windowManager: WindowManager,
         actions: MenuBarActions
     ) {
         self.store = store
         self.preferencesStore = preferencesStore
+        self.arrangementStore = arrangementStore
         self.windowManager = windowManager
         self.actions = actions
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -55,10 +65,16 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     /// Briefly shows the slot number in the menu bar, so a keyboard-driven
     /// bind is visibly confirmed.
     func flash(slot: Int, bound: Bool) {
+        flash(text: bound ? "\(slot)" : "⌫\(slot)")
+    }
+
+    /// Briefly shows a short status string next to the menu bar icon, so
+    /// keyboard-driven actions are visibly confirmed.
+    func flash(text: String) {
         flashWorkItem?.cancel()
         guard let button = statusItem.button else { return }
 
-        button.title = bound ? " \(slot)" : " ⌫\(slot)"
+        button.title = " \(text)"
         let work = DispatchWorkItem { [weak self] in
             self?.statusItem.button?.title = ""
         }
@@ -96,8 +112,23 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         addSlotItems(to: menu)
 
         menu.addItem(.separator())
+
+        let restore = menuItem(
+            "Restore All Positions  \(preferences.layoutModifiers.display)R",
+            #selector(restoreAll)
+        )
+        restore.isEnabled = store.bindings.contains { $0.savedFrame != nil }
+        menu.addItem(restore)
+
+        let undo = menuItem("Undo Layout Change  \(preferences.layoutModifiers.display)Z", #selector(undoLayout))
+        undo.isEnabled = windowManager.canUndo
+        menu.addItem(undo)
+
+        menu.addItem(.separator())
         menu.addItem(submenuItem(title: "Window Layout", submenu: layoutSubmenu()))
         menu.addItem(submenuItem(title: "Move to Display", submenu: displaySubmenu()))
+        menu.addItem(submenuItem(title: "Move to Space", submenu: spacesSubmenu()))
+        menu.addItem(submenuItem(title: "Arrangements", submenu: arrangementsSubmenu()))
         menu.addItem(submenuItem(title: "Profiles", submenu: profilesSubmenu()))
         menu.addItem(submenuItem(title: "Settings", submenu: settingsSubmenu()))
 
@@ -233,6 +264,75 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         return submenu
     }
 
+    private func spacesSubmenu() -> NSMenu {
+        let submenu = NSMenu()
+
+        guard SpacesBridge.isAvailable else {
+            submenu.addItem(disabledItem("Spaces control unavailable on this macOS version"))
+            return submenu
+        }
+
+        let count = SpacesBridge.spaceCount
+        guard count > 1 else {
+            submenu.addItem(disabledItem("Only one Space — add more in Mission Control"))
+            return submenu
+        }
+
+        for index in 0..<count {
+            let shortcut = index < 9 ? "  \(preferences.spaceModifiers.display)\(index + 1)" : ""
+            let item = NSMenuItem(
+                title: "Space \(index + 1)\(shortcut)",
+                action: #selector(moveToSpace(_:)),
+                keyEquivalent: ""
+            )
+            item.tag = index
+            item.target = self
+            submenu.addItem(item)
+        }
+
+        submenu.addItem(.separator())
+        submenu.addItem(disabledItem("Uses a private macOS API; may break on major updates"))
+        return submenu
+    }
+
+    private func arrangementsSubmenu() -> NSMenu {
+        let submenu = NSMenu()
+
+        if arrangementStore.names.isEmpty {
+            submenu.addItem(disabledItem("No saved arrangements"))
+        } else {
+            for name in arrangementStore.names {
+                let count = arrangementStore.arrangement(named: name)?.snapshots.count ?? 0
+                let item = NSMenuItem(
+                    title: "\(name) (\(count) windows)",
+                    action: #selector(restoreArrangement(_:)),
+                    keyEquivalent: ""
+                )
+                item.target = self
+                item.representedObject = name
+                submenu.addItem(item)
+            }
+        }
+
+        submenu.addItem(.separator())
+        submenu.addItem(menuItem("Save Current Arrangement…", #selector(saveArrangement)))
+
+        if !arrangementStore.names.isEmpty {
+            let delete = NSMenuItem(title: "Delete", action: nil, keyEquivalent: "")
+            let deleteMenu = NSMenu()
+            for name in arrangementStore.names {
+                let item = NSMenuItem(title: name, action: #selector(deleteArrangement(_:)), keyEquivalent: "")
+                item.target = self
+                item.representedObject = name
+                deleteMenu.addItem(item)
+            }
+            delete.submenu = deleteMenu
+            submenu.addItem(delete)
+        }
+
+        return submenu
+    }
+
     private func profilesSubmenu() -> NSMenu {
         let submenu = NSMenu()
 
@@ -247,6 +347,12 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         submenu.addItem(.separator())
         submenu.addItem(menuItem("New Empty Profile…", #selector(newProfile)))
         submenu.addItem(menuItem("Duplicate Current Profile…", #selector(duplicateProfile)))
+
+        submenu.addItem(.separator())
+        let assign = menuItem("Use for This Display Setup", #selector(assignProfileToDisplays))
+        let fingerprint = LayoutCalculator.screenFingerprint(windowManager.screenFrames())
+        assign.state = preferences.profileByFingerprint[fingerprint] == store.activeProfile ? .on : .off
+        submenu.addItem(assign)
 
         if store.profileNames.count > 1 {
             let delete = NSMenuItem(
@@ -291,17 +397,42 @@ final class MenuBarController: NSObject, NSMenuDelegate {
             )
         ))
 
-        submenu.addItem(.separator())
-        submenu.addItem(submenuItem(title: "Slots: \(preferences.clampedSlotCount)", submenu: slotCountSubmenu()))
+        if SpacesBridge.isAvailable {
+            submenu.addItem(submenuItem(
+                title: "Space Shortcut: \(preferences.spaceModifiers.display)",
+                submenu: modifierSubmenu(
+                    presets: Preferences.spacePresets,
+                    current: preferences.spaceModifiers,
+                    selector: #selector(setSpaceModifiers(_:))
+                )
+            ))
+        }
 
         submenu.addItem(.separator())
-        let toggleBack = menuItem("Press Again to Go Back", #selector(toggleToggleBack))
-        toggleBack.state = preferences.toggleBackEnabled ? .on : .off
-        submenu.addItem(toggleBack)
+        submenu.addItem(submenuItem(title: "Slots: \(preferences.clampedSlotCount)", submenu: slotCountSubmenu()))
+        submenu.addItem(submenuItem(
+            title: "Pressing Again: \(preferences.repeatPress.title)",
+            submenu: repeatPressSubmenu()
+        ))
 
         let restore = menuItem("Restore Saved Positions on Focus", #selector(toggleRestoreFrames))
         restore.state = preferences.restoreFramesOnFocus ? .on : .off
         submenu.addItem(restore)
+
+        let autoSwitch = menuItem("Switch Profiles with Display Setup", #selector(toggleAutoSwitchProfiles))
+        autoSwitch.state = preferences.autoSwitchProfiles ? .on : .off
+        submenu.addItem(autoSwitch)
+
+        submenu.addItem(.separator())
+        let dragSnap = menuItem("Snap Windows Dragged to Screen Edges", #selector(toggleDragSnapping))
+        dragSnap.state = preferences.dragToEdgeSnapping ? .on : .off
+        submenu.addItem(dragSnap)
+
+        let hud = menuItem("Show Slot Overview While Holding \(preferences.focusModifiers.display)", #selector(toggleSlotHUD))
+        hud.state = preferences.slotHUDEnabled ? .on : .off
+        submenu.addItem(hud)
+
+        submenu.addItem(submenuItem(title: "Hide Apps from Picker", submenu: exclusionsSubmenu()))
 
         submenu.addItem(.separator())
         let login = menuItem("Launch at Login", #selector(toggleLaunchAtLogin))
@@ -311,6 +442,49 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         }
         submenu.addItem(login)
 
+        return submenu
+    }
+
+    private func repeatPressSubmenu() -> NSMenu {
+        let submenu = NSMenu()
+        for (index, behavior) in RepeatPressBehavior.allCases.enumerated() {
+            let item = NSMenuItem(title: behavior.title, action: #selector(setRepeatPress(_:)), keyEquivalent: "")
+            item.target = self
+            item.tag = index
+            item.state = behavior == preferences.repeatPress ? .on : .off
+            submenu.addItem(item)
+        }
+        return submenu
+    }
+
+    /// Lists apps that currently have windows, plus anything already excluded
+    /// so a hidden app can always be un-hidden even once it has quit.
+    private func exclusionsSubmenu() -> NSMenu {
+        let submenu = NSMenu()
+        let excluded = Set(preferences.excludedBundleIDs)
+
+        var apps: [String: String] = [:]
+        for app in NSWorkspace.shared.runningApplications
+        where app.activationPolicy == .regular {
+            guard let bundleID = app.bundleIdentifier, let name = app.localizedName else { continue }
+            apps[bundleID] = name
+        }
+        for bundleID in excluded where apps[bundleID] == nil {
+            apps[bundleID] = bundleID
+        }
+
+        guard !apps.isEmpty else {
+            submenu.addItem(disabledItem("No apps running"))
+            return submenu
+        }
+
+        for (bundleID, name) in apps.sorted(by: { $0.value.localizedCaseInsensitiveCompare($1.value) == .orderedAscending }) {
+            let item = NSMenuItem(title: name, action: #selector(toggleExclusion(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = bundleID
+            item.state = excluded.contains(bundleID) ? .on : .off
+            submenu.addItem(item)
+        }
         return submenu
     }
 
@@ -385,6 +559,31 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     }
 
     @objc private func moveToDisplay(_ sender: NSMenuItem) { actions.moveToDisplay(sender.tag) }
+    @objc private func moveToSpace(_ sender: NSMenuItem) { actions.moveToSpace(sender.tag) }
+    @objc private func restoreAll() { actions.restoreAll() }
+    @objc private func undoLayout() { actions.undoLayout() }
+
+    // MARK: - Arrangement actions
+
+    @objc private func saveArrangement() {
+        guard let name = promptForName(
+            title: "Save Arrangement",
+            message: "Name for this arrangement of every open window:"
+        ) else { return }
+        actions.saveArrangement(name)
+    }
+
+    @objc private func restoreArrangement(_ sender: NSMenuItem) {
+        guard let name = sender.representedObject as? String else { return }
+        actions.restoreArrangement(name)
+    }
+
+    @objc private func deleteArrangement(_ sender: NSMenuItem) {
+        guard let name = sender.representedObject as? String else { return }
+        actions.deleteArrangement(name)
+    }
+
+    @objc private func assignProfileToDisplays() { actions.assignProfileToDisplays() }
 
     // MARK: - Profile actions
 
@@ -453,12 +652,45 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         actions.preferencesChanged()
     }
 
-    @objc private func toggleToggleBack() {
-        preferencesStore.mutate { $0.toggleBackEnabled.toggle() }
+    @objc private func setSpaceModifiers(_ sender: NSMenuItem) {
+        guard sender.tag < Preferences.spacePresets.count else { return }
+        preferencesStore.mutate { $0.spaceModifiers = Preferences.spacePresets[sender.tag] }
+        actions.preferencesChanged()
+    }
+
+    @objc private func setRepeatPress(_ sender: NSMenuItem) {
+        guard sender.tag < RepeatPressBehavior.allCases.count else { return }
+        preferencesStore.mutate { $0.repeatPress = RepeatPressBehavior.allCases[sender.tag] }
     }
 
     @objc private func toggleRestoreFrames() {
         preferencesStore.mutate { $0.restoreFramesOnFocus.toggle() }
+    }
+
+    @objc private func toggleAutoSwitchProfiles() {
+        preferencesStore.mutate { $0.autoSwitchProfiles.toggle() }
+    }
+
+    @objc private func toggleDragSnapping() {
+        preferencesStore.mutate { $0.dragToEdgeSnapping.toggle() }
+        actions.preferencesChanged()
+    }
+
+    @objc private func toggleSlotHUD() {
+        preferencesStore.mutate { $0.slotHUDEnabled.toggle() }
+        actions.preferencesChanged()
+    }
+
+    @objc private func toggleExclusion(_ sender: NSMenuItem) {
+        guard let bundleID = sender.representedObject as? String else { return }
+        preferencesStore.mutate { preferences in
+            if let index = preferences.excludedBundleIDs.firstIndex(of: bundleID) {
+                preferences.excludedBundleIDs.remove(at: index)
+            } else {
+                preferences.excludedBundleIDs.append(bundleID)
+            }
+        }
+        actions.preferencesChanged()
     }
 
     @objc private func toggleLaunchAtLogin() {

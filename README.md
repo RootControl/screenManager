@@ -63,15 +63,31 @@ collide.
 
 Thirds and two-thirds layouts are available from **Window Layout** in the menu.
 
-### Displays
+| ⌃⌥R | Restore every slot's saved position at once |
+| ⌃⌥Z | Undo the last layout or display move |
+
+### Displays and focus
 
 | Shortcut | Action |
 |----------|--------|
 | ⌃⌥⌘← / → | Move the window to the previous / next display |
 | ⌃⌥⌘1 – ⌃⌥⌘9 | Move the window to display 1–9 |
+| ⌃⌥⌘H / J / K / L | Focus the window to the left / below / above / right |
 
 Windows keep their relative position and proportional size when they move
-between displays, and are clamped to fit if the target is smaller.
+between displays, and are clamped to fit if the target is smaller. Directional
+focus works across every app and display, preferring windows in the same row or
+column so focus travels in straight lines rather than diagonally.
+
+### Spaces
+
+| Shortcut | Action |
+|----------|--------|
+| ⌃⌥⇧1 – ⌃⌥⇧9 | Move the window to Space 1–9 |
+
+macOS exposes no public API for Spaces, so these use a private one, looked up at
+runtime. If a future macOS removes it, the Spaces menu and shortcuts simply
+disappear and everything else keeps working.
 
 ## Usage
 
@@ -94,12 +110,26 @@ you have open. A slot whose window has closed is greyed out and marked
 displays, another for the laptop alone — and switches between them in one click.
 Duplicating a profile copies the current bindings into it.
 
+**Use for This Display Setup** ties the active profile to your current monitor
+arrangement. Plug in or unplug a display and the matching profile activates on
+its own.
+
+### Arrangements
+
+A profile remembers your slots; an **arrangement** remembers the whole screen.
+*Save Current Arrangement…* captures where every open window sits, and restoring
+it puts them all back. Windows that have since closed are skipped.
+
 ### Settings
 
-- Modifiers for the focus, layout, and display shortcuts
+- Modifiers for the focus, layout, display, and Space shortcuts
 - How many slots to expose (1–9)
-- Whether pressing a slot again returns you to the previous window
+- What a second press of a slot does: go back, cycle the app's windows, or nothing
 - Whether focusing a slot also restores its saved position
+- Whether profiles follow the display setup
+- Snap windows dragged to a screen edge, with a live preview of where they land
+- Show a slot overview while the focus modifier is held down
+- Hide specific apps from the window picker
 - Launch at login
 
 If macOS refuses a hotkey because another app already owns it, the menu bar
@@ -128,17 +158,21 @@ than directly out of `.build/`.
 ## Project Structure
 
 ```
-Sources/ScreenManagerCore/     # All logic — imported by the executable and the tests
-├── AppDelegate.swift          # Lifecycle, hotkey dispatch, toggle-back state
-├── BindingStore.swift         # Slot → window bindings, profiles, migration
-├── HotkeyManager.swift        # Carbon hotkey registration, IDs, and the hotkey plan
-├── LayoutCalculator.swift     # Pure frame arithmetic (halves, thirds, display moves)
-├── LoginItem.swift            # SMAppService registration
-├── MenuBarController.swift    # Status item and menus
-├── Models.swift               # WindowInfo, SlotBinding, CodableRect
-├── Preferences.swift          # Modifier combos and persisted settings
-├── WindowManager.swift        # AX API: enumerate, resolve, focus, move, reopen
-└── WindowPicker.swift         # Searchable window picker panel
+Sources/ScreenManagerCore/       # All logic — imported by the executable and the tests
+├── AppDelegate.swift            # Lifecycle, hotkey dispatch, repeat-press state
+├── ArrangementStore.swift       # Named whole-screen window captures
+├── BindingStore.swift           # Slot → window bindings, profiles, migration
+├── DragSnapController.swift     # Event tap for edge snapping, with preview
+├── HotkeyManager.swift          # Carbon hotkey registration, IDs, and the hotkey plan
+├── LayoutCalculator.swift       # Pure frame arithmetic (layouts, direction, fingerprints)
+├── LoginItem.swift              # SMAppService registration
+├── MenuBarController.swift      # Status item and menus
+├── Models.swift                 # WindowInfo, SlotBinding, WindowSnapshot, WindowQuery
+├── Preferences.swift            # Modifier combos and persisted settings
+├── SlotHUD.swift                # Hold-modifier slot overview
+├── SpacesBridge.swift           # Private Spaces API, resolved via dlsym
+├── WindowManager.swift          # AX API: enumerate, resolve, focus, move, reopen
+└── WindowPicker.swift           # Searchable window picker panel
 Sources/ScreenManager/main.swift   # Entry point shim
 Tests/ScreenManagerTests/          # Unit tests for the pure logic
 ```
@@ -152,7 +186,14 @@ closing, and being renamed.
 `~/Library/Application Support/ScreenManager/`
 
 - `bindings.json` — profiles and their slot bindings
+- `arrangements.json` — saved whole-screen arrangements
 - `preferences.json` — modifiers and settings
 
 Older single-profile `bindings.json` files are migrated automatically into a
-profile named `Default`.
+profile named `Default`. Preferences decode field by field, so a file written by
+an older or newer build keeps every setting it still recognises instead of
+resetting to defaults.
+
+Bindings self-heal: when a window has to be found by document, title, or
+position — because the app restarted and its window ID changed — the new ID is
+written back, so the next lookup matches on identity again.
